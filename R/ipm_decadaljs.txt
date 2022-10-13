@@ -1,0 +1,165 @@
+
+    model {
+    #------------------------------------------------------------
+    #  Integrated population model
+    #  - Age structured model with 2 age classes: 
+    #		  Juvenile (hatch year) and adult (after hatch year)
+    #  - Males and females
+    #-------------------------------------------------------------
+    
+    #----------------------------------------
+    # 1. Define the priors for the parameters
+    #----------------------------------------
+    
+    # 1.1 Population size
+    Nobs_tau ~ dgamma(.01, .01)         # Precision for observation error
+    Nobs_sigma <- 1 / sqrt(Nobs_tau)    # Standard deviation for observation error
+    
+    # 1.2 Survival
+    logit_sa_mu ~ dnorm(0, .01)         # Logit mean survival of adults
+    sa_mu <- ilogit(logit_sa_mu)        # Mean survival of adults
+    logit_sa_tau ~ dgamma(.01, .01)     # Precision of logit survival of adults
+    logit_sa_sigma <- 1 / sqrt(logit_sa_tau) # SD of logit survial of adults
+    
+    # Decadal juvenile survival
+    for (u in 1:4) {
+    logit_sj_mu[u] ~ dnorm(logit(0.51), 100)              # Logit mean survival of juveniles (informative priors)
+    # logit_sj_mu[u] ~ dnorm(0, .01)              # Logit mean survival of juveniles (uninformative priors)
+    sj_mu[u] <- ilogit(logit_sj_mu[u])          # Mean survival of juveniles
+    }
+    
+    for (t in 1:n.occasions) {
+    logit_sa_pred[t] <- 
+    logit_sa_mu + 
+    beta.sa2 * pdo[t] + 
+    beta.sa4 * rice[t] + 
+    beta.sa6 * (log(N[t]) - logy_mean) / logy_sd +
+    beta.sa7 * harvest[t]
+    
+    logit_sa[t] ~ dnorm(logit_sa_pred[t], logit_sa_tau)   # Logit survival of adults (covariates)
+    sa[t] <- ilogit(logit_sa[t])            
+    
+    sj[t] <- sj_mu[decade[t]]                                    # survival of juveniles (decadal survival)
+    }
+    
+    beta.sa2 ~ dnorm(0, 0.01)I(-10,10)   # Prior for slope parameter (May PDO)
+    beta.sa4 ~ dnorm(0, 0.01)I(-10,10)   # Prior for slope parameter (Rice in Sac Valley)
+    beta.sa6 ~ dnorm(0, 0.01)I(-10,10)   # Prior for slope parameter (Pop size for density-dependent processes)
+    beta.sa7 ~ dnorm(0, 0.01)I(-10,10)   # Prior for slope parameter (harvest)
+    
+    # 1.3 Time constant recovery probabilities
+    logit_rj ~ dnorm(0, .01)          # Logit recovery rate for juveniles
+    logit_ra ~ dnorm(0, .01)          # Logit recovery rate for adults
+    rj <- ilogit(logit_rj)            # Recovery rate for juveniles
+    ra <- ilogit(logit_ra)            # Recovery rate for adults
+    vul <- rj / ra                    # Vulnerability
+    
+    # 1.4 Age ratio
+    log_ratio_mean ~ dnorm(0, .01)              # Log mean female age ratio
+    ratio_mean <- exp(log_ratio_mean)           # Mean female age ratio
+    log_ratio_tau ~ dgamma(.01, .01)             # Precision of log female age ratio
+    log_ratio_sigma <- 1 / sqrt(log_ratio_tau)  # SD of log female age ratio
+    
+    for (t in 1:n.occasions) {
+    log_ratio_pred[t] <- 
+    log_ratio_mean + 
+    beta.r2 * pdo[t] + 
+    beta.r4 * rice[t] + 
+    beta.r6 * (log(N[t]) - logy_mean) / logy_sd
+    
+    log_ratio[t] ~ dnorm(log_ratio_pred[t], log_ratio_tau) # Log age ratio
+    ratio[t] <- exp(log_ratio[t])                          # Age ratio
+    } # t
+    
+    beta.r2 ~ dnorm(0, 0.01)I(-10,10)   # Prior for slope parameter (PDO)
+    beta.r4 ~ dnorm(0, 0.01)I(-10,10)   # Prior for slope parameter (rice in Sac Valley)
+    beta.r6 ~ dnorm(0, 0.01)I(-10,10)   # Prior for slope parameter (Pop size for density-dependent processes)
+    
+    #------------------------------------
+    # 2. Derived parameters
+    #------------------------------------
+    
+    # Population growth rate
+    for (t in 1:n.occasions) {
+    lambda[t] <- N[t+1]/N[t]
+    logla[t] <- log(lambda[t])
+    plam[t] <- sa[t] + ratio[t]*sj[t]
+    }
+    
+    # Geometric mean for population growth
+    mlam <- exp((1/(n.occasions-1)) * sum(logla[]))
+    
+    #--------------------------------
+    # 3. Likelihood of process model
+    #--------------------------------
+    # 3.1 Population size
+    N[1] ~ dpois(90)
+    for (t in 2:(n.occasions+1)) {
+    N_pred[t-1] <- N[t-1] * sa[t-1] + N[t-1] * ratio[t-1] * sj[t-1]
+    N[t] ~ dpois(N_pred[t-1])
+    } # t
+    
+    # 3.2 M-array
+    # 3.2.1 Juveniles
+    for (t in 1:n.occasions){
+    pr.j[t,t] <- (1-sj[t])*rj
+    # Further above main diagonal
+    for (j in (t+2):n.occasions){
+    pr.j[t,j] <- sj[t]*prod(sa[(t+1):(j-1)])*(1-sa[j])*ra
+    } #j
+    # Below main diagonal
+    for (j in 1:(t-1)){
+    pr.j[t,j] <- 0
+    } #j
+    } #t
+    
+    for (t in 1:(n.occasions-1)){
+    # One above main diagonal
+    pr.j[t,t+1] <- sj[t]*(1-sa[t+1])*ra
+    } #t
+    
+    # Last column: probability of non-recovery
+    for (t in 1:n.occasions){
+    pr.j[t,n.occasions+1] <- 1-sum(pr.j[t,1:n.occasions])
+    } #t
+    
+    # 3.2.2 Adults
+    for (t in 1:n.occasions){
+    pr.a[t,t] <- (1-sa[t])*ra
+    # Above main diagonal
+    for (j in (t+1):n.occasions){
+    pr.a[t,j] <- prod(sa[t:(j-1)])*(1-sa[j])*ra
+    } #j
+    # Below main diagonal
+    for (j in 1:(t-1)){
+    pr.a[t,j] <- 0
+    } #j
+    } #t
+    
+    # Last column: probability of non-recovery
+    for (t in 1:n.occasions){
+    pr.a[t,n.occasions+1] <- 1-sum(pr.a[t,1:n.occasions])
+    } #t
+    
+    #----------------------
+    # 4. Observation model
+    #----------------------
+    # 4.1 Population counts
+    for (t in 1:(n.occasions+1)){
+    y[t] ~ dnorm(N[t], Nobs_tau)
+    } # t
+    
+    # 4.2 M-array (survival)
+    for (t in 1:n.occasions){
+    marr.j[t,1:(n.occasions+1)] ~ dmulti(pr.j[t,], bands.j[t])
+    marr.a[t,1:(n.occasions+1)] ~ dmulti(pr.a[t,], bands.a[t])
+    } # t
+    
+    # 4.3 Tail collection (reproduction)
+    for (t in 1:n.occasions) {
+    q.obs[t] <- (ratio[t] * vul) / (1 + ratio[t] * vul)
+    wing.j[t] ~ dbin(q.obs[t], wing.t[t])
+    } # t
+    
+    } # model
+    
